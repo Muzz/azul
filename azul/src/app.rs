@@ -195,7 +195,11 @@ pub enum RuntimeError<T> {
 }
 
 pub(crate) struct FrameEventInfo {
+<<<<<<< HEAD
     pub(crate) should_redraw_window: bool,
+=======
+    pub(crate) should_swap_window: bool,
+>>>>>>> WIP
     pub(crate) should_hittest: bool,
     pub(crate) cur_cursor_pos: LogicalPosition,
     pub(crate) new_window_size: Option<LogicalSize>,
@@ -206,7 +210,11 @@ pub(crate) struct FrameEventInfo {
 impl Default for FrameEventInfo {
     fn default() -> Self {
         Self {
+<<<<<<< HEAD
             should_redraw_window: false,
+=======
+            should_swap_window: false,
+>>>>>>> WIP
             should_hittest: false,
             cur_cursor_pos: LogicalPosition::new(0.0, 0.0),
             new_window_size: None,
@@ -409,7 +417,7 @@ impl<T> App<T> {
                 _ => { events.push(e); },
             });
 
-            // let current_desktop_events = get_desktop_events(window, &events);
+            let mut single_window_results = Vec::with_capacity(self.windows.len());
 
             for (current_window_id, mut window) in self.windows.iter_mut() {
 
@@ -421,7 +429,7 @@ impl<T> App<T> {
                     _ => None
                 }).collect::<Vec<WindowEvent>>();
 
-                let (event_was_resize, window_was_closed) =
+                let single_window_result =
                     render_single_window_content(
                         self.layout_callback,
                         &self.config,
@@ -435,11 +443,11 @@ impl<T> App<T> {
                         &mut awakened_task,
                     )?;
 
-                if event_was_resize {
+                if single_window_result.needs_relayout_resize {
                     frame_was_resize = true;
                 }
 
-                if window_was_closed {
+                if single_window_result.window_should_close {
                     closed_windows.push(*current_window_id);
 
                     // TODO: Currently there is no way to return from the main event loop
@@ -447,6 +455,8 @@ impl<T> App<T> {
                     // This is a hack, so that windows currently close properly
                     return Ok(());
                 }
+
+                single_window_results.push(single_window_result);
             }
 
             #[cfg(debug_assertions)] {
@@ -465,6 +475,21 @@ impl<T> App<T> {
                 force_redraw_cache.remove(&closed_window_id);
                 self.windows.remove(&closed_window_id);
             });
+
+            let should_relayout_all_windows = single_window_results.iter().any(|res| res.should_relayout());
+            let should_rerender_all_windows = single_window_results.iter().any(|res| res.should_rerender());
+
+            if should_relayout_all_windows {
+                for (current_window_id, mut window) in self.windows.iter_mut() {
+                    relayout_single_window();
+                }
+            }
+
+            if should_rerender_all_windows {
+                for (current_window_id, mut window) in self.windows.iter_mut() {
+                    rerender_single_window();
+                }
+            }
 
             let should_redraw_timers = self.app_state.run_all_timers();
             let should_redraw_tasks = self.app_state.clean_up_finished_tasks();
@@ -595,6 +620,34 @@ font_api!(AppState::resources);
 text_api!(AppState::resources);
 clipboard_api!(AppState::resources);
 
+struct SingleWindowContentResult {
+    needs_rerender_hover_active: bool,
+    needs_relayout_hover_active: bool,
+    needs_relayout_resize: bool,
+    window_should_close: bool,
+    should_scroll_render: bool,
+    needs_relayout_tasks: bool,
+    needs_relayout_refresh: bool,
+    callbacks_update_screen: UpdateScreen,
+    hit_test_results: Option<Vec<HitTestResult>>,
+    new_focus_target: Option<FocusTarget>,
+}
+
+impl SingleWindowContentResult {
+
+    pub fn should_relayout(&self) -> bool {
+        self.needs_relayout_hover_active ||
+        self.needs_relayout_resize ||
+        self.needs_relayout_tasks ||
+        self.needs_relayout_refresh ||
+        self.callbacks_update_screen == Redraw
+    }
+
+    pub fn should_rerender(&self) -> bool {
+        self.should_relayout() || self.should_scroll_render || self.needs_rerender_hover_active
+    }
+}
+
 /// Render the contents of one single window.
 /// Returns (if the event was a resize event, if the window was closed)
 fn render_single_window_content<T>(
@@ -608,32 +661,38 @@ fn render_single_window_content<T>(
     ui_description_cache: &mut BTreeMap<GliumWindowId, UiDescription<T>>,
     force_redraw_cache: &mut BTreeMap<GliumWindowId, usize>,
     awakened_task: &mut BTreeMap<GliumWindowId, bool>,
-) -> Result<(bool, bool), RuntimeError<T>> {
+) -> Result<SingleWindowContentResult, RuntimeError<T>> {
 
     use self::RuntimeError::*;
 
-    if events.is_empty() && force_redraw_cache[window_id] == 0 {
-        // Event was not a resize event, window should **not** close
-        return Ok((false, false));
-    }
-
     let (mut frame_event_info, window_should_close) = window.state.update_window_state(&events);
+    let mut ret = SingleWindowContentResult {
+        needs_rerender_hover_active: false,
+        needs_relayout_hover_active: false,
+        needs_relayout_resize: frame_event_info.is_resize_event,
+        window_should_close,
+        should_scroll_render: false,
+        needs_relayout_tasks: awakened_task[window_id],
+        needs_relayout_refresh: force_redraw_cache[window_id] > 0,
+        callbacks_update_screen: DontRedraw,
+        hit_test_results: None,
+        new_focus_target: None,
+    };
 
-    if window_should_close {
-        // Event was not a resize event, window should close
-        return Ok((false, true));
+    if events.is_empty() || !ret.should_relayout() {
+        // Event was not a resize event, window should **not** close
+        ret.window_should_close = window_should_close;
+        return Ok(window_should_close);
     }
-
-    let mut hit_test_results = None;
 
     if frame_event_info.should_hittest {
 
-        hit_test_results = do_hit_test(&window, &app_state.resources);
+        ret.hit_test_results = do_hit_test(&window, &app_state.resources);
 
         for event in events.iter() {
 
             let callback_result = call_callbacks(
-                hit_test_results.as_ref(),
+                ret.hit_test_results.as_ref(),
                 event,
                 window,
                 &window_id,
@@ -642,7 +701,14 @@ fn render_single_window_content<T>(
             )?;
 
             if callback_result.should_update_screen == Redraw {
-                frame_event_info.should_redraw_window = true;
+                ret.callbacks_update_screen = Redraw;
+            }
+            if callback_result.needs_redraw_anyways {
+                ret.needs_rerender_hover_active = true;
+            }
+
+            if callback_result.needs_relayout_anyways {
+                ret.needs_relayout_hover_active = true;
             }
 
             // Note: Don't set `pending_focus_target` directly here, because otherwise
@@ -650,12 +716,14 @@ fn render_single_window_content<T>(
             // by callbacks that return `None`.
             if let Some(overwrites_focus) = callback_result.callbacks_overwrites_focus {
                 window.state.internal.pending_focus_target = Some(overwrites_focus);
+                ret.new_focus_target = Some(overwrites_focus);
             }
         }
     }
 
     // Scroll for the scrolled amount for each node that registered a scroll state.
-    let should_scroll_render = update_scroll_state(window, hit_test_results, &mut app_state.resources);
+    let should_scroll_render = update_scroll_state(window, &ret.hit_test_results, &mut app_state.resources);
+    ret.should_scroll_render = should_scroll_render;
 
     if frame_event_info.is_resize_event {
         // This is a hack because during a resize event, winit eats the "awakened"
@@ -688,6 +756,7 @@ fn render_single_window_content<T>(
     // Reset the scroll amount to 0 (for the next frame)
     window.clear_scroll_state();
 
+<<<<<<< HEAD
     // If there is already a layout construction in progress, prevent
     // re-rendering on layout, otherwise this leads to jankiness during scrolling
     let should_relayout = frame_event_info.should_redraw_window || awakened_task[window_id] || force_redraw_cache[window_id] > 0;
@@ -721,23 +790,51 @@ fn render_single_window_content<T>(
             &mut *window,
             &mut fake_window,
             &mut app_state.resources,
-        );
-        *awakened_task.get_mut(window_id).ok_or(WindowIndexError)? = false;
+=======
+    Ok(ret)
+}
 
-        if let Some(i) = force_redraw_cache.get_mut(window_id) {
-            if *i > 0 { *i -= 1 };
-            if *i == 1 {
-                clean_up_unused_opengl_textures(app_state.resources.fake_display.renderer.as_mut().unwrap().flush_pipeline_info());
-            }
+fn relayout_single_window() {
+
+    // Call the Layout::layout() fn, get the DOM
+    *ui_state_cache.get_mut(window_id).ok_or(WindowIndexError)? =
+        UiState::from_app_state(app_state, window_id)?;
+
+    // Style the DOM (is_mouse_down is necessary for styling :hover, :active + :focus nodes)
+    let is_mouse_down = window.state.internal.mouse_state.mouse_down();
+
+    *ui_description_cache.get_mut(window_id).ok_or(WindowIndexError)? =
+        UiDescription::match_css_to_dom(
+            ui_state_cache.get_mut(window_id).ok_or(WindowIndexError)?,
+            &window.css,
+            &mut window.state.internal.focused_node,
+            &mut window.state.internal.pending_focus_target,
+            &window.state.internal.hovered_nodes,
+            is_mouse_down,
+>>>>>>> WIP
+        );
+
+    let mut fake_window = app_state.windows.get_mut(window_id).ok_or(WindowIndexError)?;
+    update_display_list(
+        &mut app_state.data,
+        &ui_description_cache[window_id],
+        &ui_state_cache[window_id],
+        &mut *window,
+        &mut fake_window,
+        &mut app_state.resources,
+    );
+    *awakened_task.get_mut(window_id).ok_or(WindowIndexError)? = false;
+
+    if let Some(i) = force_redraw_cache.get_mut(window_id) {
+        if *i > 0 { *i -= 1 };
+        if *i == 1 {
+            clean_up_unused_opengl_textures(app_state.resources.fake_display.renderer.as_mut().unwrap().flush_pipeline_info());
         }
     }
+}
 
-    // TODO: Render all windows again, not just this one!
-    // if should_relayout || should_rerender {
-        render_inner(window, &mut app_state.resources, Transaction::new(), config.background_color);
-    // }
-
-    Ok((frame_event_info.is_resize_event, false))
+fn rerender_single_window() {
+    render_inner(window, &mut app_state.resources, Transaction::new(), config.background_color);
 }
 
 /// Returns if there was an error with the CSS reloading, necessary so that the error message is only printed once
@@ -816,6 +913,14 @@ struct CallCallbackReturn {
     /// Whether one or more callbacks have messed with the current
     /// focused element i.e. via `.clear_focus()` or similar.
     pub callbacks_overwrites_focus: Option<FocusTarget>,
+    /// Whether the screen should be redrawn even if no Callback returns an `UpdateScreen::Redraw`.
+    /// This is necessary for `:hover` and `:active` mouseovers - otherwise the screen would
+    /// only update on the next resize.
+    pub needs_redraw_anyways: bool,
+    /// Same as `needs_redraw_anyways`, but for reusing the layout from the previous frame.
+    /// Each `:hover` and `:active` group stores whether it modifies the layout, as
+    /// a performance optimization.
+    pub needs_relayout_anyways: bool,
 }
 
 /// Returns an bool whether the window should be redrawn or not (true - redraw the screen, false: don't redraw).
@@ -929,10 +1034,6 @@ fn call_callbacks<T>(
         }
     }
 
-    if callbacks_filter_list.needs_redraw_anyways {
-        should_update_screen = Redraw;
-    }
-
     app_state.windows.get_mut(window_id).ok_or(WindowIndexError)?
         .set_keyboard_state(&KeyboardState::default());
     app_state.windows.get_mut(window_id).ok_or(WindowIndexError)?
@@ -941,6 +1042,8 @@ fn call_callbacks<T>(
     Ok(CallCallbackReturn {
         should_update_screen,
         callbacks_overwrites_focus,
+        needs_redraw_anyways: callbacks_filter_list.needs_redraw_anyways,
+        needs_relayout_anyways: callbacks_filter_list.needs_relayout_anyways,
     })
 }
 
